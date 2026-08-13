@@ -1,0 +1,26 @@
+# Gradle
+.gradle/
+build/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.ipr
+*.iws
+
+# Minecraft dev run directory (runtime data, logs, config, mods)
+run/
+
+# Logs & scratch
+*.log
+serverG.log
+compile-f.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# NOTE: libs/ and local-maven/ are intentionally tracked — build.gradle and
+# settings.gradle reference them as build-time dependencies (EMI compileOnly
+# jar and the offline Fabric maven).

@@ -1,0 +1,52 @@
+{
+  "parent": "minecraft:block/block",
+  "textures": {
+    "particle": "beyonddimensions:block/net_terminal_block_texture",
+    "terminal": "beyonddimensions:block/net_terminal_block_texture"
+  },
+  "elements": [
+    {
+      "from": [0, 0, 0],
+      "to": [16, 16, 16],
+      "faces": {
+        "north": {
+          "uv": [0, 0, 4, 4],
+          "texture": "#terminal",
+          "cullface": "north"
+        },
+        "south": {
+          "uv": [0, 4, 4, 8],
+          "texture": "#terminal",
+          "cullface": "south"
+        },
+        "east": {
+          "uv": [4, 0, 4.75, 4],
+          "texture": "#terminal",
+          "cullface": "east"
+        },
+        "west": {
+          "uv": [4, 4, 4.75, 8],
+          "texture": "#terminal",
+          "cullface": "west"
+        },
+        "up": {
+          "uv": [4.75, 0, 8.75, 0.75],
+          "texture": "#terminal",
+          "cullface": "up"
+        },
+        "down": {
+          "uv": [4.75, 0.75, 8.75, 1.5],
+          "texture": "#terminal",
+          "cullface": "down"
+        }
+      }
+    }
+  ],
+  "display": {
+    "fixed": {
+      "rotation": [ 0, 180, 0 ],
+      "translation": [ 0, 0, -2 ],
+      "scale": [ 0.5, 0.5, 0.5 ]
+    }
+  }
+}

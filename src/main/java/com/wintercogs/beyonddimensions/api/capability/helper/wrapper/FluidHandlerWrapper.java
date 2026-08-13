@@ -1,0 +1,101 @@
+package com.wintercogs.beyonddimensions.api.capability.helper.wrapper;
+
+import com.wintercogs.beyonddimensions.api.storage.key.impl.FluidStackKey;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.item.ItemStack;
+import com.wintercogs.beyonddimensions.forgecompat.fluids.FluidStack;
+import com.wintercogs.beyonddimensions.forgecompat.fluids.capability.IFluidHandler;
+import com.wintercogs.beyonddimensions.forgecompat.fluids.capability.IFluidHandlerItem;
+
+import java.util.Optional;
+
+public class FluidHandlerWrapper implements IStackHandlerWrapper<FluidStack>
+{
+    private final IFluidHandler fluidHandler;
+
+    public FluidHandlerWrapper(Object fluidHandler)
+    {
+        this.fluidHandler = (IFluidHandler) fluidHandler;
+    }
+
+
+    @Override
+    public ResourceLocation getTypeId()
+    {
+        return FluidStackKey.ID;
+    }
+
+    @Override
+    public int getSlots()
+    {
+        return fluidHandler.getTanks();
+    }
+
+    @Override
+    public FluidStack getStackInSlot(int slot)
+    {
+        return fluidHandler.getFluidInTank(slot);
+    }
+
+    @Override
+    public long getCapacity(int slot)
+    {
+        return fluidHandler.getTankCapacity(slot);
+    }
+
+    @Override
+    public boolean isStackValid(int slot, FluidStack stack)
+    {
+        return fluidHandler.isFluidValid(slot, stack);
+    }
+
+    @Override
+    public long insert(int slot, FluidStack stack, boolean sim)
+    {
+        // neoforge对流体没有按槽位插入的方案
+        // 故直接调用无槽位方案
+        return insert(stack, sim);
+    }
+
+    @Override
+    public long insert(FluidStack stack, boolean sim)
+    {
+        int currentNum = stack.getAmount();
+        int insert;
+        if (sim)
+            insert = fluidHandler.fill(stack, IFluidHandler.FluidAction.SIMULATE);
+        else
+            insert = fluidHandler.fill(stack, IFluidHandler.FluidAction.EXECUTE);
+        return currentNum - insert;
+    }
+
+    @Override
+    public long extract(int slot, long amount, boolean sim)
+    {
+        if (amount <= 0) return 0;
+        if (slot < 0 || slot >= getSlots()) return 0;
+        FluidStack target = fluidHandler.getFluidInTank(slot);
+
+        if (sim)
+            return fluidHandler.drain(new FluidStack(target, (int) Math.min(amount, Integer.MAX_VALUE)), IFluidHandler.FluidAction.SIMULATE).getAmount();
+        else
+            return fluidHandler.drain(new FluidStack(target, (int) Math.min(amount, Integer.MAX_VALUE)), IFluidHandler.FluidAction.EXECUTE).getAmount();
+    }
+
+    @Override
+    public long extract(FluidStack stack, boolean sim)
+    {
+        if (sim)
+            return fluidHandler.drain(stack, IFluidHandler.FluidAction.SIMULATE).getAmount();
+        else
+            return fluidHandler.drain(stack, IFluidHandler.FluidAction.EXECUTE).getAmount();
+    }
+
+    @Override
+    public Optional<ItemStack> getContainer()
+    {
+        if (fluidHandler instanceof IFluidHandlerItem fluidHandlerItem)
+            return Optional.of(fluidHandlerItem.getContainer());
+        return Optional.empty();
+    }
+}

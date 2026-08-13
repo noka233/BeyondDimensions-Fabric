@@ -1,0 +1,90 @@
+package com.wintercogs.beyonddimensions.common.block;
+
+import com.mojang.logging.LogUtils;
+import com.wintercogs.beyonddimensions.common.block.entity.NetInterfaceBlockEntity;
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.BlockHitResult;
+import com.wintercogs.beyonddimensions.forgecompat.network.NetworkHooks;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+
+public class NetInterfaceBlock extends BaseMachineBlock
+{
+
+    private static final Logger LOGGER = LogUtils.getLogger();
+
+    public NetInterfaceBlock(Properties properties)
+    {
+        super(properties);
+    }
+
+
+    @Override
+    public InteractionResult use(BlockState state, Level level, BlockPos pos, Player player, InteractionHand hand, BlockHitResult hitResult)
+    {
+        super.use(state, level, pos, player, hand, hitResult);
+        if (!level.isClientSide() && !player.isShiftKeyDown())
+        {
+            NetworkHooks.openScreen((ServerPlayer) player, (NetInterfaceBlockEntity) level.getBlockEntity(pos), buf -> {
+                buf.writeBoolean(false);
+                buf.writeBlockPos(pos);
+            });
+        }
+        return InteractionResult.SUCCESS;
+    }
+
+    @Override
+    public void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean movedByPiston)
+    {
+        if (!state.is(newState.getBlock()))
+        {
+            if (level.getBlockEntity(pos) instanceof NetInterfaceBlockEntity blockEntity)
+            {
+                level.updateNeighbourForOutputSignal(pos, this);
+                blockEntity.dropContent();
+            }
+            super.onRemove(state, level, pos, newState, movedByPiston);
+        }
+    }
+
+    @Override
+    public void neighborChanged(BlockState state, Level level, BlockPos pos, Block neighborBlock, BlockPos neighborPos, boolean moved)
+    {
+        super.neighborChanged(state, level, pos, neighborBlock, neighborPos, moved);
+        if (level.getBlockEntity(pos) instanceof NetInterfaceBlockEntity blockEntity)
+        {
+            blockEntity.setNeedsCapabilityUpdate();
+        }
+    }
+
+    @Override
+    public boolean hasAnalogOutputSignal(BlockState state)
+    {
+        return true;
+    }
+
+    @Override
+    public int getAnalogOutputSignal(BlockState state, Level level, BlockPos pos)
+    {
+        BlockEntity be = level.getBlockEntity(pos);
+        if (be instanceof NetInterfaceBlockEntity ce)
+        {
+            return ce.getRedstoneLevel(); // 0..15
+        }
+        return 0;
+    }
+
+    @Override
+    public @Nullable BlockEntity newBlockEntity(BlockPos blockPos, BlockState blockState)
+    {
+        return new NetInterfaceBlockEntity(blockPos, blockState);
+    }
+}

@@ -1,0 +1,23 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    {
+      "item": "beyonddimensions:net_pathway"
+    },
+    {
+      "item": "create:schematic_table"
+    }
+  ],
+  "result": {
+    "item": "beyonddimensions:schematicannon_pathway"
+  },
+  "fabric:load_conditions": [
+    {
+      "condition": "fabric:all_mods_loaded",
+      "values": [
+        "create"
+      ]
+    }
+  ]
+}

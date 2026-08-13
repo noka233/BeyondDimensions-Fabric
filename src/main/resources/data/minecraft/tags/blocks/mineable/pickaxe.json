@@ -1,0 +1,31 @@
+{
+  "values": [
+    "beyonddimensions:net_control",
+    "beyonddimensions:net_interface",
+    "beyonddimensions:net_pathway",
+    "beyonddimensions:net_energy_pathway",
+    "beyonddimensions:net_terminal_block",
+    "beyonddimensions:net_pump_block",
+    "beyonddimensions:net_hopper_block",
+    "beyonddimensions:net_furnace_block",
+    "beyonddimensions:net_blast_furnace_block",
+    "beyonddimensions:net_smoker_block",
+    "beyonddimensions:dimensional_connect_block",
+    {
+      "id": "beyonddimensions:ars_source_pathway",
+      "required": false
+    },
+    {
+      "id": "beyonddimensions:mana_pool_pathway",
+      "required": false
+    },
+    {
+      "id": "beyonddimensions:schematicannon_pathway",
+      "required": false
+    },
+    {
+      "id": "beyonddimensions:rs_net_pathway",
+      "required": false
+    }
+  ]
+}

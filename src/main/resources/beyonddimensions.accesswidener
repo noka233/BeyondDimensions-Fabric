@@ -1,0 +1,18 @@
+accessWidener v1 named
+
+accessible method net/minecraft/world/inventory/AbstractContainerMenu triggerSlotListeners (ILnet/minecraft/world/item/ItemStack;Ljava/util/function/Supplier;)V
+accessible method net/minecraft/world/inventory/AbstractContainerMenu synchronizeSlotToRemote (ILnet/minecraft/world/item/ItemStack;Ljava/util/function/Supplier;)V
+accessible method net/minecraft/world/inventory/AbstractContainerMenu synchronizeCarriedToRemote ()V
+accessible method net/minecraft/world/inventory/AbstractContainerMenu updateDataSlotListeners (II)V
+accessible method net/minecraft/world/inventory/AbstractContainerMenu synchronizeDataSlotToRemote (II)V
+accessible field net/minecraft/world/inventory/AbstractContainerMenu dataSlots Ljava/util/List;
+accessible method net/minecraft/client/gui/screens/inventory/AbstractContainerScreen findSlot (DD)Lnet/minecraft/world/inventory/Slot;
+accessible method net/minecraft/client/gui/screens/inventory/AbstractContainerScreen renderSlot (Lnet/minecraft/client/gui/GuiGraphics;Lnet/minecraft/world/inventory/Slot;)V
+mutable field net/minecraft/world/inventory/Slot x I
+mutable field net/minecraft/world/inventory/Slot y I
+accessible field net/minecraft/world/item/ItemStack tag Lnet/minecraft/nbt/CompoundTag;
+accessible field net/minecraft/client/gui/components/AbstractWidget height I
+mutable field net/minecraft/client/gui/components/AbstractWidget height I
+accessible field net/minecraft/client/gui/screens/Screen renderables Ljava/util/List;
+accessible field net/minecraft/client/gui/screens/inventory/AbstractContainerScreen leftPos I
+accessible field net/minecraft/client/gui/screens/inventory/AbstractContainerScreen topPos I

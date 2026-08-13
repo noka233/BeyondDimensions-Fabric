@@ -1,0 +1,862 @@
+package com.wintercogs.beyonddimensions.api.dimensionnet;
+
+import com.wintercogs.beyonddimensions.api.event.dimensionnet.DimensionsNetEvent;
+import com.wintercogs.beyonddimensions.api.storage.handler.impl.AbstractUnorderedStackHandler;
+import com.wintercogs.beyonddimensions.api.storage.key.IStackKey;
+import com.wintercogs.beyonddimensions.api.storage.key.KeyAmount;
+import com.wintercogs.beyonddimensions.api.storage.key.impl.EnergyStackKey;
+import com.wintercogs.beyonddimensions.api.storage.key.impl.ItemStackKey;
+import com.wintercogs.beyonddimensions.common.init.BDItems;
+import com.wintercogs.beyonddimensions.config.ServerConfigRuntime;
+import com.wintercogs.beyonddimensions.util.PlayerNameHelper;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.StringTag;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import com.wintercogs.beyonddimensions.forgecompat.common.MinecraftForge;
+import com.wintercogs.beyonddimensions.forgecompat.event.TickEvent;
+import com.wintercogs.beyonddimensions.forgecompat.eventbus.api.SubscribeEvent;
+import com.wintercogs.beyonddimensions.forgecompat.server.ServerLifecycleHooks;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.util.*;
+
+
+/**
+ * 此类即模组概念中的“维度网络”，并实际负责存储和持久化数据
+ * <p>
+ * 使用{@link DimensionsNet#createNewNetForPlayer(Player, long, int)}来创建一个持久化保存的维度网络
+ * <p>
+ */
+public class DimensionsNet extends BackedUpSavedData
+{
+    static final String NET_DATA_PREFIX = "BDNet_";
+    public static final int NO_PRIMARY_NET_ID = -1;
+    public static final int MAX_NETWORK_NAME_LENGTH = 48;
+    private static final String CUSTOM_NAME_TAG = "custom_name";
+
+    /**
+     * 作为网络的唯一标识符，id从0开始，小于0的id均可以认为是无效网络
+     * <p>
+     * 被删除的网络均使用-99作为特殊标记
+     */
+    private int id;
+
+    /**
+     * 玩家自定义网络名。空字符串表示未命名，展示时回退到本地化默认名。
+     */
+    private String customName = "";
+
+    /**
+     * deleted为真则表示网络被删除，被删除的网络仍可被{@link SavedData}的方法获得，但不应该被使用
+     * <p>
+     * 此数据会随着SavedData持久化保存
+     */
+    public boolean deleted = false;
+
+    /**
+     * 网络所有者
+     */
+    private UUID owner;
+
+    /**
+     * 网络管理员，包含所有者
+     */
+    private final Set<UUID> managers = new HashSet<>();
+
+    /**
+     * 网络成员，包含所有的管理员
+     */
+    private final Set<UUID> players = new HashSet<>();
+
+    /**
+     * 通用存储空间，存储任何实现了{@link IStackKey}的资源类型
+     */
+    private final @NotNull UnifiedStorage unifiedStorage;
+
+    /**
+     * 标记网络是否为一个临时网络，临时网络通常用于客户端菜单的同步中，作为资源容器使用
+     * <p>
+     * 临时网络不会执行生成破碎的时空结晶之类的操作
+     */
+    private final boolean temporary;
+
+    /**
+     * currentTime是流动的倒计时，用于生成破碎时空结晶，该数据持久化保存
+     * <p>
+     * holdTime是固定的时间间隔，用于确定多久生成一次时间间隔，每当currentTime归零，holdTime会为它赋值
+     */
+    private int currentTime = 0;
+
+    /**
+     * 构造函数
+     *
+     * @param temporary 为真则说明是临时网络
+     */
+    public DimensionsNet(boolean temporary)
+    {
+        unifiedStorage = new UnifiedStorage(this, AbstractUnorderedStackHandler.UiTimestampPolicy.AUTO);
+        // 注意：不能使用 addListener(this::onServerTick)！
+        // IEventBus.findEventType 依赖 getGenericInterfaces() 反射推断事件类型，
+        // 而 javac 不会把方法引用的泛型签名写入合成 lambda 类（实测返回 Object.class），
+        // 导致监听器注册到 Object.class 键下、事件永远无法命中，结晶生成逻辑成为死代码。
+        // register(this) 走 @SubscribeEvent 注解 + 方法参数类型（编译期 Class）反射，可靠。
+        MinecraftForge.EVENT_BUS.register(this);
+        this.temporary = temporary;
+    }
+
+    // 基本函数
+
+    /**
+     * 用于构造SavedData的工厂方法，一般来说，你不需要调用这个方法
+     */
+    public static DimensionsNet create()
+    {
+        return new DimensionsNet(false);
+    }
+
+    /**
+     * 用于创建一个维度网络，仅在服务端调用
+     *
+     * @param player                传入的玩家会作为网络所有者
+     * @param defaultSlotCapability 新网络单个槽位可存储的容量
+     * @param defaultSlotMaxSize    新网络所拥有的槽位数量
+     * @return 返回新创建的维度网络，但如果传入的player加入了一个网络，只会返回其当前所在的网络
+     */
+    public static @Nullable DimensionsNet createNewNetForPlayer(Player player, long defaultSlotCapability, int defaultSlotMaxSize)
+    {
+        DimensionsNet net = DimensionsNet.getNetFromPlayer(player);
+        if (net != null) return net;
+
+        MinecraftServer server = player.getServer();
+        if (server != null)
+        {
+            int allocatedNetId = NetRegistryIndex.get(server).allocateNetId(server);
+            String netDataName = DimensionsNet.buildNetDataName(allocatedNetId);
+            DimensionsNet newNet = NetSaveBackupHelper.safeLoad(server, netDataName, DimensionsNet::load, DimensionsNet::create, true);
+            newNet.setId(allocatedNetId);
+            NetRegistryIndex.get(server).registerNet(server, allocatedNetId);
+            newNet.setOwner(player.getUUID(), false);
+            newNet.setDirty();
+            newNet.unifiedStorage.setSlotCapacity(defaultSlotCapability);
+            newNet.unifiedStorage.setSlotMaxSize(defaultSlotMaxSize);
+            MinecraftForge.EVENT_BUS.post(new DimensionsNetEvent.Created(newNet));
+
+            return newNet;
+        }
+        return null;
+    }
+
+    /**
+     * 构建最新的，可用的网络名称，用于创建新网络时确定新网络的id，仅在服务端调用
+     *
+     * @param dataProvider 用于获取SavedData
+     * @return 最新可用的网络名称，内容为字符串："BDNet_<数字id>"
+     */
+    public static String buildNewNetName(@NotNull MinecraftServer dataProvider)
+    {
+        return buildNetDataName(NetRegistryIndex.get(dataProvider).allocateNetId(dataProvider));
+    }
+
+    public static String buildNetDataName(int netId)
+    {
+        return NET_DATA_PREFIX + netId;
+    }
+
+    /**
+     * 尝试从数字id获取一个维度网络，仅在服务端调用
+     *
+     * @param id 数字id
+     * @return 返回找到的网络，如果数字id对应的网络不存在或者不合法(例如被删除)，则直接返回null
+     */
+    public static @Nullable DimensionsNet getNetFromId(int id)
+    {
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server == null) return null;
+        return getNetFromId(server, id);
+    }
+
+    static @Nullable DimensionsNet getNetFromId(@NotNull MinecraftServer server, int id)
+    {
+        if (id < 0) return null;
+
+        DimensionsNet net = NetSaveBackupHelper.safeLoad(server, buildNetDataName(id), DimensionsNet::load, DimensionsNet::create, false);
+        if (net != null && !net.deleted)
+        {
+            return net;
+        }
+        return null;
+    }
+
+    /**
+     * 尝试从玩家获取维度网络，仅在服务端调用
+     *
+     * @param player 玩家
+     * @return 返回玩家所在的维度网络，如果不存在，则返回null
+     */
+    @Deprecated(forRemoval = false)
+    public static @Nullable DimensionsNet getNetFromPlayer(Player player)
+    {
+        return getPrimaryNetFromPlayer(player);
+    }
+
+    public static @Nullable DimensionsNet getPrimaryNetFromPlayer(Player player)
+    {
+        MinecraftServer server = player.getServer();
+        if (server == null) return null;
+
+        PlayerNetIndex index = PlayerNetIndex.get(server);
+        int primaryNetId = index.getPrimaryNetId(player.getUUID());
+        if (primaryNetId == PlayerNetIndex.NO_PRIMARY_NET)
+        {
+            return null;
+        }
+
+        return getNetFromId(server, primaryNetId);
+    }
+
+    public static @NotNull List<DimensionsNet> getAllNetFromPlayer(Player player)
+    {
+        MinecraftServer server = player.getServer();
+        if (server == null)
+        {
+            return List.of();
+        }
+
+        PlayerNetIndex index = PlayerNetIndex.get(server);
+        List<Integer> netIds = index.getAllNetIds(player.getUUID());
+        if (netIds.isEmpty())
+        {
+            return List.of();
+        }
+
+        List<DimensionsNet> nets = new ArrayList<>(netIds.size());
+        for (int netId : netIds)
+        {
+            DimensionsNet net = getNetFromId(server, netId);
+            if (net != null)
+            {
+                nets.add(net);
+            }
+        }
+        return nets;
+    }
+
+    public static boolean hasAnyNet(Player player)
+    {
+        MinecraftServer server = player.getServer();
+        return server != null && PlayerNetIndex.get(server).hasAnyMembership(player.getUUID());
+    }
+
+    public static boolean hasPrimaryNet(Player player)
+    {
+        return getPrimaryNetFromPlayer(player) != null;
+    }
+
+    public static boolean setPrimaryNetForPlayer(Player player, @Nullable DimensionsNet net)
+    {
+        MinecraftServer server = player.getServer();
+        if (server == null)
+        {
+            return false;
+        }
+
+        PlayerNetIndex index = PlayerNetIndex.get(server);
+        return net == null
+                ? index.setPrimary(player.getUUID(), PlayerNetIndex.NO_PRIMARY_NET)
+                : index.setPrimary(player.getUUID(), net.getId());
+    }
+
+    public static void clearPrimaryNetForPlayer(Player player)
+    {
+        MinecraftServer server = player.getServer();
+        if (server == null)
+        {
+            return;
+        }
+
+        PlayerNetIndex.get(server).clearPrimary(player.getUUID());
+    }
+
+    /**
+     * 从硬盘反序列化维度网络，用于SavedData的工厂方法
+     */
+    public static DimensionsNet load(CompoundTag tag)
+    {
+        try
+        {
+            return doLoad(tag);
+        }
+        catch (Exception e)
+        {
+            LOGGER.error("[BD-SAFE] 维度网络存档解析失败，已保留原始文件并尝试从备份恢复", e);
+            DimensionsNet net = new DimensionsNet(false);
+            net.id = -1;
+            net.markLoadFailed();
+            return net;
+        }
+    }
+
+    private static DimensionsNet doLoad(CompoundTag tag)
+    {
+        DimensionsNet net = new DimensionsNet(false);
+
+        net.id = tag.getInt("Id");
+        if (tag.contains(CUSTOM_NAME_TAG))
+            net.customName = sanitizeCustomName(tag.getString(CUSTOM_NAME_TAG));
+
+        UUID owner = tag.hasUUID("Owner") ? tag.getUUID("Owner") : null;
+        if (owner != null)
+        {
+            net.owner = owner;
+        }
+
+        net.unifiedStorage.deserializeNBT(tag.getCompound("UnifiedStorage"));
+        // 旧数据兼容
+        if (tag.contains("EnergyStorage"))
+        {
+            CompoundTag energyTag = tag.getCompound("EnergyStorage");
+            if (energyTag.contains("Energy"))
+            {
+                net.unifiedStorage.insert(EnergyStackKey.INSTANCE, energyTag.getLong("Energy"), false);
+            }
+        }
+
+        if (tag.contains("Managers"))
+        {
+            ListTag managerList = tag.getList("Managers", 8);
+            managerList.forEach(manager -> net.managers.add(UUID.fromString(manager.getAsString())));
+        }
+
+        if (tag.contains("Players"))
+        {
+            ListTag playerList = tag.getList("Players", 8); // 8 表示 StringTag
+            playerList.forEach(player -> net.players.add(UUID.fromString(player.getAsString())));
+        }
+
+        // 读取倒计时
+        net.currentTime = tag.getInt("currentTime");
+
+        if (tag.contains("Deleted"))
+            net.deleted = tag.getBoolean("Deleted");
+
+        return net;
+    }
+
+    /**
+     * 把维度网络序列化，以保存到硬盘
+     */
+    @Override
+    public @NotNull CompoundTag save(CompoundTag tag)
+    {
+        // 保存 ID
+        tag.putInt("Id", this.id);
+        if (!this.customName.isEmpty())
+            tag.putString(CUSTOM_NAME_TAG, this.customName);
+
+        // 保存网络所有者 UUID
+        if (this.owner != null)
+            tag.putUUID("Owner", this.owner);
+
+        if (!tag.contains("OldDataTag"))
+        {
+            tag.putBoolean("OldDataTag", true);
+        }
+
+        // 保存网络管理者
+        ListTag managerListTag = new ListTag();
+        for (UUID manager : managers)
+        {
+            managerListTag.add(StringTag.valueOf(manager.toString()));
+        }
+        tag.put("Managers", managerListTag);
+
+        // 保存绑定的玩家列表
+        ListTag playerListTag = new ListTag();
+        for (UUID player : players)
+        {
+            playerListTag.add(StringTag.valueOf(player.toString()));
+        }
+        tag.put("Players", playerListTag);
+
+        // 保存存储
+        tag.put("UnifiedStorage", unifiedStorage.serializeNBT());
+
+        // 保存倒计时
+        tag.putInt("currentTime", this.currentTime);
+
+        // 保存删除状态
+        tag.putBoolean("Deleted", this.deleted);
+
+        return tag;
+    }
+
+
+    // 功能函数
+
+    /**
+     * 获取网络id
+     */
+    public int getId()
+    {
+        return id;
+    }
+
+    /**
+     * 获取用于展示的网络名。自定义名为空时，返回本地化默认名。
+     */
+    public Component getNetworkName()
+    {
+        return getNetworkName(this.id, this.customName);
+    }
+
+    /**
+     * 供客户端快照等没有 DimensionsNet 实例的场景复用同一命名规则。
+     */
+    public static Component getNetworkName(int netId, @Nullable String customName)
+    {
+        String sanitizedName = sanitizeCustomName(customName);
+        if (!sanitizedName.isEmpty())
+            return Component.literal(sanitizedName);
+
+        return Component.translatable("menu.text.beyonddimensions.net.default_name", netId);
+    }
+
+    public String getCustomName()
+    {
+        return customName;
+    }
+
+    public boolean hasCustomName()
+    {
+        return !customName.isEmpty();
+    }
+
+    public void setCustomName(@Nullable String customName)
+    {
+        String sanitizedName = sanitizeCustomName(customName);
+        if (Objects.equals(this.customName, sanitizedName))
+            return;
+
+        this.customName = sanitizedName;
+        setDirty();
+    }
+
+    /**
+     * 设置网络id
+     */
+    public void setId(int Id)
+    {
+        this.id = Id;
+        setDirty();
+    }
+
+    /**
+     * 获取网络所有者的uuid
+     */
+    public UUID getOwner()
+    {
+        return owner;
+    }
+
+    /**
+     * 设置新的网络所有者
+     * <p>
+     * 注意，这不会把原所有者从网络中删除，他会成为网络管理员
+     */
+    public void setOwner(UUID owner)
+    {
+        setOwner(owner, true);
+    }
+
+    private void setOwner(UUID owner, boolean dispatchEvent)
+    {
+        UUID beforeOwner = this.owner;
+
+        this.owner = owner;
+        addManager(owner, false);
+        setDirty();
+
+        if (dispatchEvent && beforeOwner != null && !beforeOwner.equals(owner))
+        {
+            MinecraftForge.EVENT_BUS.post(new DimensionsNetEvent.OwnerChanged(this, beforeOwner, owner));
+        }
+    }
+
+    /**
+     * 获取包含所有管理员uuid的集合
+     */
+    public Set<UUID> getManagers()
+    {
+        return managers;
+    }
+
+    /**
+     * 添加一个网络管理员
+     *
+     * @param managerId 新增管理员的uuid
+     */
+    public void addManager(UUID managerId)
+    {
+        addManager(managerId, true);
+    }
+
+    private void addManager(UUID managerId, boolean dispatchEvent)
+    {
+        Objects.requireNonNull(managerId);
+        boolean wasMember = players.contains(managerId);
+        boolean managerAdded = managers.add(managerId);
+        boolean playerAdded = addPlayer(managerId, false);
+
+        if (!managerAdded && !playerAdded)
+        {
+            return;
+        }
+
+        if (managerAdded && !playerAdded)
+        {
+            setDirty();
+        }
+
+        if (dispatchEvent && managerAdded)
+        {
+            DimensionsNetEvent.MemberChangeState changeState = wasMember
+                    ? DimensionsNetEvent.MemberChangeState.PROMOTED_TO_MANAGER
+                    : DimensionsNetEvent.MemberChangeState.JOINED_AS_MANAGER;
+            MinecraftForge.EVENT_BUS.post(new DimensionsNetEvent.MemberChanged(this, managerId, changeState));
+        }
+    }
+
+    /**
+     * 移除一个网络管理员，该管理员将会降级为成员
+     * <p>
+     * 不能直接移除当前所有者
+     */
+    public void removeManager(UUID managerId)
+    {
+        Objects.requireNonNull(managerId);
+        if (managerId.equals(owner))
+        {
+            return;
+        }
+        if (managers.remove(managerId))
+        {
+            setDirty();
+            MinecraftForge.EVENT_BUS.post(new DimensionsNetEvent.MemberChanged(
+                    this,
+                    managerId,
+                    DimensionsNetEvent.MemberChangeState.DEMOTED_TO_MEMBER
+            ));
+        }
+    }
+
+    /**
+     * 获取当前网络所有的玩家集合
+     */
+    public Set<UUID> getPlayers()
+    {
+        return players;
+    }
+
+    /**
+     * 添加一个网络成员
+     */
+    public void addPlayer(UUID playerId)
+    {
+        addPlayer(playerId, true);
+    }
+
+    private boolean addPlayer(UUID playerId, boolean dispatchEvent)
+    {
+        Objects.requireNonNull(playerId);
+        if (players.add(playerId))
+        {
+            syncPlayerMembership(playerId, true);
+            setDirty();
+
+            if (dispatchEvent)
+            {
+                DimensionsNetEvent.MemberChangeState changeState = managers.contains(playerId)
+                        ? DimensionsNetEvent.MemberChangeState.JOINED_AS_MANAGER
+                        : DimensionsNetEvent.MemberChangeState.JOINED_AS_MEMBER;
+                MinecraftForge.EVENT_BUS.post(new DimensionsNetEvent.MemberChanged(this, playerId, changeState));
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 从网络踢出一个玩家，你不能直接移除当前所有者
+     * <p>
+     * 但是你可以直接移除任何其他成员
+     */
+    public void removePlayer(UUID playerId)
+    {
+        removePlayer(playerId, true);
+    }
+
+    /**
+     * 让一个玩家主动离开网络，你不能让当前所有者直接离开。
+     */
+    public void leavePlayer(UUID playerId)
+    {
+        removePlayer(playerId, false);
+    }
+
+    private void removePlayer(UUID playerId, boolean kicked)
+    {
+        Objects.requireNonNull(playerId);
+        if (playerId.equals(owner))
+        {
+            return;
+        }
+        if (players.remove(playerId))
+        {
+            boolean wasManager = managers.remove(playerId);
+            syncPlayerRemoval(playerId);
+            setDirty();
+
+            DimensionsNetEvent.MemberChangeState changeState;
+            if (kicked)
+            {
+                changeState = wasManager
+                        ? DimensionsNetEvent.MemberChangeState.KICKED_AS_MANAGER
+                        : DimensionsNetEvent.MemberChangeState.KICKED_AS_MEMBER;
+            }
+            else
+            {
+                changeState = wasManager
+                        ? DimensionsNetEvent.MemberChangeState.LEFT_AS_MANAGER
+                        : DimensionsNetEvent.MemberChangeState.LEFT_AS_MEMBER;
+            }
+            MinecraftForge.EVENT_BUS.post(new DimensionsNetEvent.MemberChanged(this, playerId, changeState));
+        }
+    }
+
+    /**
+     * 传入的玩家是否为所有者
+     *
+     * @param player 玩家
+     * @return 是所有者则返回真
+     */
+    public boolean isOwner(Player player)
+    {
+        return player.getUUID().equals(getOwner());
+    }
+
+    /**
+     * 传入的玩家uuid是否为所有者
+     *
+     * @param playerId 玩家的uuid
+     * @return 是所有者则返回真
+     */
+    public boolean isOwner(UUID playerId)
+    {
+        return playerId.equals(getOwner());
+    }
+
+    /**
+     * 传入的玩家是否为管理员
+     */
+    public boolean isManager(Player player)
+    {
+        return managers.contains(player.getUUID());
+    }
+
+    /**
+     * 传入的玩家uuid是否为管理员
+     */
+    public boolean isManager(UUID playerId)
+    {
+        return managers.contains(playerId);
+    }
+
+    /**
+     * 合并另一个网络，其所有资源，玩家均被合并，但其绑定的方块会自动解绑（通过标记另一个网络为被删除实现）
+     * <p>
+     * 仅在服务端使用
+     *
+     * @param otherNet 被合并的网络
+     */
+    public void mergeOtherNet(DimensionsNet otherNet)
+    {
+        // 合并玩家和管理员
+        for (Map.Entry<UUID, PlayerPermissionInfo> entry : otherNet.getPlayerPermissionInfoMap(ServerLifecycleHooks.getCurrentServer()).entrySet())
+        {
+            if (entry.getValue().level() == NetPermissionlevel.Owner || entry.getValue().level() == NetPermissionlevel.Manager)
+                addManager(entry.getKey());
+            else if (entry.getValue().level() == NetPermissionlevel.Member)
+                addPlayer(entry.getKey());
+        }
+        // 合并统一存储系统
+        for (KeyAmount stack : otherNet.getUnifiedStorage().getStorage())
+        {
+            unifiedStorage.insert(stack.key(), stack.amount(), false);
+        }
+
+        // 销毁另一个网络
+        otherNet.destroySelf();
+    }
+
+    /**
+     * 销毁当前网络
+     */
+    public void destroySelf()
+    {
+        if (this.deleted)
+        {
+            return;
+        }
+
+        int previousNetId = this.id;
+        DimensionsNetEvent.Destroyed destroyedEvent = new DimensionsNetEvent.Destroyed(
+                previousNetId,
+                this.customName,
+                List.copyOf(this.unifiedStorage.getStorage()),
+                this.owner,
+                Set.copyOf(this.managers),
+                Set.copyOf(this.players)
+        );
+
+        List<UUID> playerIds = new ArrayList<>(this.players);
+        for (UUID playerId : playerIds)
+        {
+            syncPlayerRemoval(playerId, previousNetId);
+        }
+
+        // 这里有一些问题。即我们实际上无法删除已经存在的SaveData。
+        // 所以我们要做的是巧妙地将此SaveData有关数据指向移除。
+        // 然后将所有对应的存储容量设置为0
+        this.owner = null;
+        this.managers.clear();
+        this.players.clear();
+        this.id = -99; // 用-99作为被删除的特殊标记
+        this.unifiedStorage.clearStorage();
+        this.deleted = true;
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server != null)
+        {
+            NetRegistryIndex.get(server).unregisterNet(server, previousNetId);
+        }
+        setDirty();
+        MinecraftForge.EVENT_BUS.post(destroyedEvent);
+    }
+
+
+    /**
+     * 获取一份当前网络所有玩家的UUID以及其对应的最高权限等级的映射
+     */
+    public HashMap<UUID, PlayerPermissionInfo> getPlayerPermissionInfoMap(@NotNull MinecraftServer dataProvider)
+    {
+
+        HashMap<UUID, PlayerPermissionInfo> infoMap = new HashMap<>();
+        for (UUID playerId : players)
+        {
+            if (isOwner(playerId))
+            {
+                infoMap.put(playerId, new PlayerPermissionInfo(PlayerNameHelper.getPlayerNameByUUID(playerId, dataProvider), NetPermissionlevel.Owner));
+            }
+            else if (isManager(playerId))
+            {
+                infoMap.put(playerId, new PlayerPermissionInfo(PlayerNameHelper.getPlayerNameByUUID(playerId, dataProvider), NetPermissionlevel.Manager));
+            }
+            else
+            {
+                infoMap.put(playerId, new PlayerPermissionInfo(PlayerNameHelper.getPlayerNameByUUID(playerId, dataProvider), NetPermissionlevel.Member));
+            }
+        }
+        return infoMap;
+    }
+
+    /**
+     * 获取当前网络所携带的统一存储空间，统一存储空间是网络存储资源的地方
+     *
+     * @return 当前网络的统一存储空间
+     */
+    public @NotNull UnifiedStorage getUnifiedStorage()
+    {
+        return this.unifiedStorage;
+    }
+
+    /**
+     * 用于执行定期操作，目前仅用于生成破碎的时空结晶
+     */
+    @SubscribeEvent
+    public void onServerTick(TickEvent.ServerTickEvent event)
+    {
+        if (loadFailed())
+        {
+            return;
+        }
+
+        // 不对临时网络执行倒计时
+        if (temporary || ServerConfigRuntime.crystalGenerateTime <= 0)
+            return;
+
+        currentTime++;
+        setDirty();
+        if (currentTime >= ServerConfigRuntime.crystalGenerateTime * 20)
+        {
+            ItemStack stack = new ItemStack(BDItems.SHATTERED_SPACE_TIME_CRYSTALLIZATION.get(), 1);
+            this.unifiedStorage.insert(new ItemStackKey(stack), stack.getCount(), false);
+            currentTime = 0;
+        }
+
+    }
+
+    private void syncPlayerMembership(UUID playerId, boolean switchPrimary)
+    {
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server == null || id < 0)
+        {
+            return;
+        }
+
+        PlayerNetIndex.get(server).addMembership(playerId, id, switchPrimary);
+    }
+
+    private void syncPlayerRemoval(UUID playerId)
+    {
+        syncPlayerRemoval(playerId, this.id);
+    }
+
+    private static void syncPlayerRemoval(UUID playerId, int netId)
+    {
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server == null || netId < 0)
+        {
+            return;
+        }
+
+        PlayerNetIndex.get(server).removeMembership(playerId, netId);
+    }
+
+    private static String sanitizeCustomName(@Nullable String customName)
+    {
+        if (customName == null)
+            return "";
+
+        String trimmedName = customName.trim();
+        if (trimmedName.isEmpty())
+            return "";
+
+        StringBuilder builder = new StringBuilder(Math.min(trimmedName.length(), MAX_NETWORK_NAME_LENGTH));
+        int appendedCodePoints = 0;
+        for (int offset = 0; offset < trimmedName.length() && appendedCodePoints < MAX_NETWORK_NAME_LENGTH; )
+        {
+            int codePoint = trimmedName.codePointAt(offset);
+            offset += Character.charCount(codePoint);
+            if (Character.isISOControl(codePoint))
+                continue;
+
+            builder.appendCodePoint(codePoint);
+            appendedCodePoints++;
+        }
+        return builder.toString().trim();
+    }
+}
